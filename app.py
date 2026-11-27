@@ -10,8 +10,8 @@ from persist import load, save
 
 st.set_page_config(page_title='A-COMPARE', layout='wide')
 st.title('A-COMPARE')
-st.caption('V5 · API 진단')
-URL='https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade'
+st.caption('V6 · 아파트 상세 API')
+URL='https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev'
 now=dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
 end=pd.Period(now.date(),freq='M')-1
 preset=st.sidebar.radio('분석 기간', ['1년','3년','5년','10년','직접 설정'], index=2, horizontal=True)
