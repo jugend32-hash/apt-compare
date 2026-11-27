@@ -7,8 +7,8 @@ import streamlit as st
 import altair as alt
 from persist import load, save
 
-st.set_page_config(page_title='아파트 가격 격차 분석', layout='wide')
-st.title('아파트 가격 격차 분석')
+st.set_page_config(page_title='A-COMPARE', layout='wide')
+st.title('A-COMPARE')
 URL='https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade'
 now=dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
 end=pd.Period(now.date(),freq='M')-1
@@ -32,9 +32,22 @@ def fetch(month,key):
         if not items: raise ValueError('페이지 누락')
         page+=1
 
+required = ('MOLIT_API_KEY', 'GITHUB_DATA_REPO', 'GITHUB_DATA_TOKEN')
+try:
+    missing_secrets = [k for k in required if not str(st.secrets.get(k, '')).strip()]
+except Exception:
+    missing_secrets = list(required)
+if missing_secrets:
+    st.error('Streamlit Secrets 설정 누락: ' + ', '.join(missing_secrets))
+    st.info('앱 Settings > Secrets에서 위 항목을 최상위 TOML 키로 입력하고 저장하세요.')
+    st.stop()
 if 'apt_snapshot' not in st.session_state:
     try: st.session_state.apt_snapshot,st.session_state.apt_sha=load()
-    except Exception as e: st.error('GitHub 저장소 연결 실패: '+type(e).__name__); st.stop()
+    except Exception as e:
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        hints = {401:'토큰 인증 실패',403:'토큰 권한 또는 API 제한 확인',404:'저장소 이름 및 토큰 접근 권한 확인'}
+        st.error('GitHub 저장소 연결 실패: ' + (hints.get(status, 'HTTP '+str(status)) if status else type(e).__name__))
+        st.stop()
 snap=st.session_state.apt_snapshot
 buckets=snap.get('buckets',{})
 keys=[code+'-'+m.strftime('%Y%m') for m in months]
