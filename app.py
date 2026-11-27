@@ -10,7 +10,7 @@ from persist import load, save
 
 st.set_page_config(page_title='A-COMPARE', layout='wide')
 st.title('A-COMPARE')
-st.caption('V7 · 아파트 상세 API')
+st.caption('V8 · 아파트 상세 API')
 URL='https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev'
 now=dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
 end=pd.Period(now.date(),freq='M')-1
@@ -106,7 +106,8 @@ if st.button('신규 실거래 데이터 갱신' if not missing else '실거래 
         except Exception as e: st.error('저장 실패: '+type(e).__name__)
     if errors: st.warning('수집 실패: '+', '.join(errors))
 rows=[]
-for k in keys:
+history_keys=sorted(k for k in buckets if k.startswith(code+'-') and k<=keys[-1])
+for k in history_keys:
     for x in buckets.get(k,[]):
         if any(x.get(f,'') not in ('','-') for f in ('cdealDay','cdealType')): continue
         try:
@@ -124,7 +125,7 @@ def choose(label,word,area):
     idx=next((i for i,n in enumerate(names) if word in n),0)
     name=st.sidebar.selectbox(label,names,index=idx,key=label)
     areas=sorted(df.loc[df['단지']==name,'면적'].unique())
-    selected=st.sidebar.selectbox(label+' 전용면적(㎡)',areas,index=min(range(len(areas)),key=lambda i:abs(areas[i]-area)),key=label+'area')
+    selected=st.sidebar.selectbox(label+' 전용면적(㎡)',areas,index=min(range(len(areas)),key=lambda i:abs(areas[i]-area)),key=label+'area'+name)
     return name,selected
 base=choose('기준 단지','동방',59.97)
 a=choose('비교 A','원앙',49.83)
@@ -132,37 +133,54 @@ b=choose('비교 B','원앙',52)
 st.sidebar.caption('공급평형과 전용면적의 대응은 단지 정보와 대조해 확인하세요.')
 if st.sidebar.checkbox('1층 이하 제외'): df=df[df['층']>1]
 if st.sidebar.checkbox('직거래 제외'): df=df[df['거래방식']!='직거래']
-mode=st.radio('분석 방식',['월별 실거래 평균','최근 3개월 실거래 평균','최근 6개월 실거래 평균'],horizontal=True,index=1)
-w={'월별 실거래 평균':1,'최근 3개월 실거래 평균':3,'최근 6개월 실거래 평균':6}[mode]
-idx=pd.Index(months.astype(str),name='월'); table=pd.DataFrame(index=idx); detail=[]
-labels=['기준','비교 A','비교 B']
-for label,(name,area) in zip(labels,[base,a,b]):
-    sub=df[(df['단지']==name)&(df['면적']==area)].copy(); sub['구분']=label; detail.append(sub)
-    agg=sub.groupby('월')['가격'].agg(['sum','count']).reindex(idx).fillna(0)
-    table[label+' 거래건수']=agg['count'].astype(int)
-    counts=agg['count'].rolling(w,min_periods=w).sum(); sums=agg['sum'].rolling(w,min_periods=w).sum()
-    coverage=pd.Series([k in buckets for k in keys],index=idx).rolling(w,min_periods=w).sum()==w
-    table[label]=(sums/counts.where(counts>0)).where(coverage)
-for label in labels[1:]: table[label+' 격차']=(table[label]/table['기준'].where(table['기준']>0)-1)*100
-st.caption(' | '.join(f'{l}: {n} {ar}㎡' for l,(n,ar) in zip(labels,[base,a,b])))
+if len({base,a,b})<3:
+    st.warning('동일 단지·전용면적이 중복 선택되었습니다. 비교 대상을 변경하세요.')
+mode=st.radio('분석 방식',['직전 실거래 적용','월별 실거래 평균','최근 3개월 실거래 평균','최근 6개월 실거래 평균'],horizontal=True)
+idx=pd.Index(months.astype(str),name='월')
+first_history=min([months[0]]+[pd.Period(k.split('-')[1],freq='M') for k in history_keys])
+hidx=pd.Index(pd.period_range(first_history,months[-1],freq='M').astype(str),name='월')
+covered=pd.Series([code+'-'+m.replace('-','') in buckets for m in hidx],index=hidx)
+table=pd.DataFrame(index=idx); detail=[]
+labels=['기준','비교 A','비교 B']; selections=[base,a,b]
+for label,(name,area) in zip(labels,selections):
+    sub=df[(df['단지']==name)&(df['면적']==area)].copy(); sub['구분']=label; detail.append(sub[sub['월'].isin(idx)])
+    agg=sub.groupby('월')['가격'].agg(['sum','count']).reindex(hidx).fillna(0)
+    actual=(agg['sum']/agg['count'].where(agg['count']>0)).where(covered)
+    table[label+' 거래건수']=agg['count'].where(covered).reindex(idx).astype('Int64')
+    if mode=='직전 실거래 적용':
+        # Never carry prices across months that have not been collected.
+        groups=(~covered).cumsum()
+        price=actual.groupby(groups).ffill().where(covered)
+        source=pd.Series(hidx,index=hidx).where(actual.notna()).groupby(groups).ffill().where(covered)
+        table[label+' 적용월']=source.reindex(idx)
+        table[label+' 가격구분']=pd.Series('미수집/가격없음',index=idx).mask(price.reindex(idx).notna(),'직전 거래월 평균').mask(actual.reindex(idx).notna(),'당월 실거래 평균')
+    else:
+        w={'월별 실거래 평균':1,'최근 3개월 실거래 평균':3,'최근 6개월 실거래 평균':6}[mode]
+        counts=agg['count'].rolling(w,min_periods=w).sum(); sums=agg['sum'].rolling(w,min_periods=w).sum()
+        price=(sums/counts.where(counts>0)).where(covered.rolling(w,min_periods=w).sum()==w)
+    table[label]=price.reindex(idx)
+active=[]
+for label,sel in zip(labels[1:],selections[1:]):
+    if sel==base or (label=='비교 B' and sel==a): continue
+    table[label+' 격차']=(table[label]/table['기준'].where(table['기준']>0)-1)*100
+    active.append(label)
+st.caption(' | '.join(f'{l}: {n} {ar}㎡' for l,(n,ar) in zip(labels,selections)))
 st.subheader('매매가격 추이 (만원)'); st.line_chart(table[labels])
-st.subheader('가격 격차 추이 (%)')
-for label in labels[1:]:
-    s=table[label+' 격차']; valid=s.dropna(); st.markdown('**'+label+' vs 기준**')
+st.subheader('월별 가격 격차 추이 (%)')
+series=[]
+for label in active:
+    s=table[label+' 격차']; valid=s.dropna()
+    name,area=selections[labels.index(label)]; title=f'{label}: {name} {area:g}㎡'
+    st.markdown('**'+title+'**')
     if valid.empty: st.warning('비교 가능한 기간 없음'); continue
     avg=valid.mean(); latest=valid.iloc[-1]; month=valid.index[-1]; cols=st.columns(4)
     cols[0].metric('기간 평균',f'{avg:.1f}%'); cols[1].metric('최근 비교 '+month,f'{latest:.1f}%'); cols[2].metric('평균 대비',f'{latest-avg:+.1f}%p'); cols[3].metric('유효 월',f'{len(valid)}/{len(months)}')
-    chart=pd.DataFrame({'월':idx,'격차':s.values,'평균':avg,'20% 기준':20,'하단':valid.quantile(.25),'상단':valid.quantile(.75)})
-    x=alt.X('월:O',axis=alt.Axis(labelAngle=-60,labelOverlap=True)); band=alt.Chart(chart).mark_area(opacity=.12,color='green').encode(x=x,y='하단:Q',y2='상단:Q')
-    line=alt.Chart(chart).transform_fold(['격차','평균','20% 기준'],as_=['항목','값']).mark_line(point=True).encode(x=x,y=alt.Y('값:Q',title='격차 (%)',scale=alt.Scale(zero=False)),color='항목:N',tooltip=[alt.Tooltip('월:O'),alt.Tooltip('항목:N'),alt.Tooltip('값:Q',format='.2f')]); 
-    try:
-        st.altair_chart(band+line,use_container_width=True)
-    except (ValueError, TypeError):
-        st.warning('상세 그래프 표시 오류: 기본 그래프로 대체합니다.')
-        st.line_chart(chart.set_index('월')[['격차','평균','20% 기준']])
-    if len(valid)<6: st.warning('유효 비교 월이 6개월 미만입니다. 평균 격차 및 예상 가격은 참고용이며 투자 판단에 충분하지 않습니다.')
+    for kind,values in [('월별 격차',s),('기간 평균',pd.Series(avg,index=idx))]:
+        series.extend({'월':m,'값':float(v) if pd.notna(v) else None,'비교':label,'종류':kind,'구간':int(seg)} for (m,v),seg in zip(values.items(),values.isna().cumsum()))
+    if len(valid)<6: st.warning('유효 비교 월이 6개월 미만입니다.')
     st.caption(f'최소 {valid.min():.1f}% ({valid.idxmin()}) / 최대 {valid.max():.1f}% ({valid.idxmax()}) / 최근 12개월 평균 {s.tail(12).mean():.1f}%')
-    current=table.loc[month,label]; target=current/(1+avg/100); st.write(f'비교 가격 유지 및 평균 격차 회복 가정: 기준 예상 가격 {target:,.0f}만원 (현재 비교 시점 기준 {table.loc[month,"기준"]:,.0f}만원)')
+    target=table.loc[month,label]/(1+avg/100)
+    st.write(f'비교 가격 유지 및 평균 격차 회복 가정: 기준 예상 가격 {target:,.0f}만원 (현재 비교 시점 기준 {table.loc[month,"기준"]:,.0f}만원)')
     episodes=[]; start=None
     for m,v in s.items():
         if pd.isna(v): start=None; continue
@@ -171,7 +189,21 @@ for label in labels[1:]:
             episodes.append({'확대 시작':start,'평균 회복':m,'소요 개월':pd.Period(m,freq='M').ordinal-pd.Period(start,freq='M').ordinal}); start=None
     if episodes: st.dataframe(pd.DataFrame(episodes),hide_index=True)
     else: st.caption('평균+10%p 이상 확대 후 평균 이하로 회복한 연속 관측 사례 없음')
-st.caption('선택 기간 평균은 유효 월 기준입니다. 전체 저장 기간 평균은 별도 기간을 선택하여 비교할 수 있습니다.')
-st.caption('이동평균은 해당 기간의 모든 거래를 건수 가중 평균합니다. 거래 없는 월은 월별 모드에서 공란입니다. 평균회귀는 보장되지 않으며 비교 단지 하락으로도 격차가 축소될 수 있습니다.')
-st.subheader('월별 비교표'); st.dataframe(table.round(2).sort_index(ascending=False)); st.download_button('월별 비교 CSV',table.to_csv().encode('utf-8-sig'),'monthly.csv')
+if series:
+    chart=pd.DataFrame(series).dropna(subset=['값'])
+    x=alt.X('월:O',sort=list(idx),scale=alt.Scale(domain=list(idx)),axis=alt.Axis(labelAngle=-60,labelOverlap=True))
+    common=alt.Chart(chart).encode(x=x,y=alt.Y('값:Q',title='격차 (%)',scale=alt.Scale(zero=False)),color=alt.Color('비교:N'),strokeDash=alt.StrokeDash('종류:N'),detail=alt.Detail('구간:N'),tooltip=['월:O','비교:N','종류:N',alt.Tooltip('값:Q',format='.1f')])
+    line=common.mark_line(point=True)
+    text=common.transform_filter(alt.datum['종류']=='월별 격차').mark_text(dy=-10,fontSize=10).encode(text=alt.Text('값:Q',format='.1f'))
+    try: st.altair_chart((line+text).properties(height=380),use_container_width=True)
+    except (ValueError,TypeError): st.line_chart(table[[l+' 격차' for l in active]])
+st.caption('직전 실거래 적용은 마지막 거래월의 평균 가격을 사용한 추정치입니다. 미수집 월은 공란이며 평균회귀는 보장되지 않습니다.')
+st.subheader('월별 비교표 (가격: 만원, 격차: %)')
+ordered=['기준','기준 거래건수']
+for label in labels[1:]:
+    ordered.extend([label,label+' 격차',label+' 거래건수'])
+ordered=[c for c in ordered if c in table]+[c for c in table if c not in ordered]
+table=table[ordered]
+st.dataframe(table.round(1).sort_index(ascending=False),use_container_width=True,height=650)
+st.download_button('월별 비교 CSV',table.to_csv().encode('utf-8-sig'),'monthly.csv')
 raw=pd.concat(detail,ignore_index=True); st.subheader('개별 실거래'); st.dataframe(raw); st.download_button('개별 거래 CSV',raw.to_csv(index=False).encode('utf-8-sig'),'transactions.csv')
