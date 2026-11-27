@@ -1,5 +1,6 @@
 import datetime as dt
 import time
+from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
@@ -9,6 +10,7 @@ from persist import load, save
 
 st.set_page_config(page_title='A-COMPARE', layout='wide')
 st.title('A-COMPARE')
+st.caption('V5 · API 진단')
 URL='https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade'
 now=dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
 end=pd.Period(now.date(),freq='M')-1
@@ -34,17 +36,27 @@ def fetch(month,key):
     while True:
         for attempt in range(3):
             try:
-                r=requests.get(URL,params={'serviceKey':key,'LAWD_CD':code,'DEAL_YMD':month,'pageNo':page,'numOfRows':1000},timeout=(10,40)); r.raise_for_status(); break
+                r=requests.get(URL,params={'serviceKey':unquote(key),'LAWD_CD':code,'DEAL_YMD':month,'pageNo':page,'numOfRows':1000},timeout=(10,40)); r.raise_for_status(); break
             except (requests.Timeout,requests.ConnectionError):
                 if attempt==2: raise
                 time.sleep(2**attempt)
         root=ET.fromstring(r.content)
-        if root.findtext('.//resultCode') not in ('00','000','0'): raise ValueError('API 권한 또는 응답 오류')
+        if root.findtext('.//resultCode') not in ('00','000','0'): raise ValueError('API 응답 코드: '+str(root.findtext('.//resultCode') or root.findtext('.//returnReasonCode') or 'unknown'))
         items=root.findall('.//item'); rows.extend([{e.tag:(e.text or '').strip() for e in x} for x in items])
         total=int(root.findtext('.//totalCount') or 0)
         if len(rows)>=total: return rows
         if not items: raise ValueError('페이지 누락')
         page+=1
+
+def safe_error(e):
+    if isinstance(e, requests.HTTPError):
+        status=e.response.status_code if e.response is not None else 0
+        hints={400:'요청 형식 확인',401:'인증키 및 활용 승인 확인',403:'API 접근 권한 확인',404:'API 주소 확인',429:'호출 한도 확인',500:'서버 오류',502:'게이트웨이 오류',503:'서비스 일시 중단'}
+        return f'HTTP {status}: '+hints.get(status,'API 응답 오류')
+    if isinstance(e, ValueError) and str(e).startswith('API 응답 코드: '):
+        code=str(e).split(': ',1)[1]
+        return 'API 응답 코드: '+(code if code.isdigit() else 'unknown')
+    return type(e).__name__
 
 required = ('MOLIT_API_KEY', 'GITHUB_DATA_REPO', 'GITHUB_DATA_TOKEN')
 try:
@@ -55,6 +67,12 @@ if missing_secrets:
     st.error('Streamlit Secrets 설정 누락: ' + ', '.join(missing_secrets))
     st.info('앱 Settings > Secrets에서 위 항목을 최상위 TOML 키로 입력하고 저장하세요.')
     st.stop()
+if st.sidebar.button('API 연결 테스트'):
+    try:
+        test=fetch(months[-1].strftime('%Y%m'),str(st.secrets['MOLIT_API_KEY']).strip())
+        st.success(f'API 연결 성공: {months[-1]} / {len(test)}건 (저장하지 않음)')
+    except Exception as e:
+        st.error('API 연결 실패: '+safe_error(e))
 if 'apt_snapshot' not in st.session_state:
     try: st.session_state.apt_snapshot,st.session_state.apt_sha=load()
     except Exception as e:
@@ -77,7 +95,7 @@ if st.button('신규 실거래 데이터 갱신' if not missing else '실거래 
     st.caption(f'조회 대상 {len(jobs)}개월 (미수집 및 최근 3개월, 전체 재검증 선택 시 선택 기간 전체)')
     for i,k in enumerate(jobs):
         try: candidate[k]=fetch(k.split('-')[1],key)
-        except Exception as e: errors.append(k+': '+type(e).__name__)
+        except Exception as e: errors.append(k+': '+safe_error(e))
         bar.progress((i+1)/len(jobs))
     if len(errors)<len(jobs):
         new={'buckets':candidate,'updated':now.strftime('%Y-%m-%d %H:%M')}
