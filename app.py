@@ -10,7 +10,7 @@ from persist import load, save
 
 st.set_page_config(page_title='A-COMPARE', layout='wide')
 st.title('A-COMPARE')
-st.caption('V6 · 아파트 상세 API')
+st.caption('V7 · 아파트 상세 API')
 URL='https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev'
 now=dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))
 end=pd.Period(now.date(),freq='M')-1
@@ -143,7 +143,7 @@ for label,(name,area) in zip(labels,[base,a,b]):
     counts=agg['count'].rolling(w,min_periods=w).sum(); sums=agg['sum'].rolling(w,min_periods=w).sum()
     coverage=pd.Series([k in buckets for k in keys],index=idx).rolling(w,min_periods=w).sum()==w
     table[label]=(sums/counts.where(counts>0)).where(coverage)
-for label in labels[1:]: table[label+' 격차']=(table[label]/table['기준']-1)*100
+for label in labels[1:]: table[label+' 격차']=(table[label]/table['기준'].where(table['기준']>0)-1)*100
 st.caption(' | '.join(f'{l}: {n} {ar}㎡' for l,(n,ar) in zip(labels,[base,a,b])))
 st.subheader('매매가격 추이 (만원)'); st.line_chart(table[labels])
 st.subheader('가격 격차 추이 (%)')
@@ -154,7 +154,13 @@ for label in labels[1:]:
     cols[0].metric('기간 평균',f'{avg:.1f}%'); cols[1].metric('최근 비교 '+month,f'{latest:.1f}%'); cols[2].metric('평균 대비',f'{latest-avg:+.1f}%p'); cols[3].metric('유효 월',f'{len(valid)}/{len(months)}')
     chart=pd.DataFrame({'월':idx,'격차':s.values,'평균':avg,'20% 기준':20,'하단':valid.quantile(.25),'상단':valid.quantile(.75)})
     x=alt.X('월:O',axis=alt.Axis(labelAngle=-60,labelOverlap=True)); band=alt.Chart(chart).mark_area(opacity=.12,color='green').encode(x=x,y='하단:Q',y2='상단:Q')
-    line=alt.Chart(chart).transform_fold(['격차','평균','20% 기준'],as_=['항목','값']).mark_line(point=True).encode(x=x,y=alt.Y('값:Q',title='격차 (%)',scale=alt.Scale(zero=False)),color='항목:N',tooltip=['월','항목',alt.Tooltip('값:Q',format='.2f')]); st.altair_chart(band+line,use_container_width=True)
+    line=alt.Chart(chart).transform_fold(['격차','평균','20% 기준'],as_=['항목','값']).mark_line(point=True).encode(x=x,y=alt.Y('값:Q',title='격차 (%)',scale=alt.Scale(zero=False)),color='항목:N',tooltip=[alt.Tooltip('월:O'),alt.Tooltip('항목:N'),alt.Tooltip('값:Q',format='.2f')]); 
+    try:
+        st.altair_chart(band+line,use_container_width=True)
+    except (ValueError, TypeError):
+        st.warning('상세 그래프 표시 오류: 기본 그래프로 대체합니다.')
+        st.line_chart(chart.set_index('월')[['격차','평균','20% 기준']])
+    if len(valid)<6: st.warning('유효 비교 월이 6개월 미만입니다. 평균 격차 및 예상 가격은 참고용이며 투자 판단에 충분하지 않습니다.')
     st.caption(f'최소 {valid.min():.1f}% ({valid.idxmin()}) / 최대 {valid.max():.1f}% ({valid.idxmax()}) / 최근 12개월 평균 {s.tail(12).mean():.1f}%')
     current=table.loc[month,label]; target=current/(1+avg/100); st.write(f'비교 가격 유지 및 평균 격차 회복 가정: 기준 예상 가격 {target:,.0f}만원 (현재 비교 시점 기준 {table.loc[month,"기준"]:,.0f}만원)')
     episodes=[]; start=None
